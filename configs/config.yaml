@@ -1,0 +1,52 @@
+# ── Paths ──────────────────────────────────────────────────────────────────
+paths:
+  raw_csv: "/content/drive/MyDrive/TESS_Project/data/raw/tess2018206190142-s0001-s0013_dvr-tcestats.csv"
+  processed_dir: "/content/drive/MyDrive/TESS_Project/data/processed"
+  checkpoint_dir: "/content/drive/MyDrive/TESS_Project/checkpoints"
+
+# ── Data / Preprocessing ───────────────────────────────────────────────────
+data:
+  snr_threshold: 10.0          # Minimum tce_model_snr to keep.
+                               # NOTE: rows where tce_model_snr == -1 (sentinel)
+                               # are removed first before this threshold is applied.
+  min_transits: 2              # Minimum number of observed transits required.
+                               # 99 rows in the CSV have < 2 transits and
+                               # cannot be reliably phase-folded.
+  global_view_length: 2048     # Points in the global phase-folded view
+  local_view_length: 201       # Points in the local transit-window view
+  local_view_fraction: 0.15    # Fraction of phase for the local view (±7.5%)
+  val_fraction: 0.15
+  test_fraction: 0.15
+  seed: 42
+
+# ── Model ──────────────────────────────────────────────────────────────────
+model:
+  cnn_channels: [32, 64, 128]
+  cnn_kernel_size: 5
+  cnn_dropout: 0.1
+  d_model: 256
+  nhead: 8
+  num_transformer_layers: 2
+  dim_feedforward: 512
+  transformer_dropout: 0.1
+  classifier_dropout: 0.3
+
+# ── Training ───────────────────────────────────────────────────────────────
+training:
+  epochs: 80
+  batch_size: 64
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  focal_alpha: 0.75
+  focal_gamma: 2.0
+  lr_scheduler: "cosine"
+  warmup_epochs: 5
+  patience: 15
+  grad_clip: 1.0
+
+# ── Logging ────────────────────────────────────────────────────────────────
+logging:
+  use_wandb: true
+  wandb_project: "tess-exoplanet-hybrid"
+  wandb_entity: null           # Replace with your W&B username
+  log_interval: 10

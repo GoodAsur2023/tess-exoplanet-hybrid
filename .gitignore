@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+
+# Virtual environments
+venv/
+.env/
+env/
+
+# Data (large files — don't commit to git)
+data/raw/
+data/processed/
+checkpoints/
+outputs/
+raw_cache/
+*.fits
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# W&B
+wandb/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (CRITICAL: Ignore the .env file, not just the folder)
+.env
+*.env
+
+# Testing and Linting Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Editor / IDE settings
+.vscode/
+.idea/
