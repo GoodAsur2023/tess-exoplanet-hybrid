@@ -1,13 +1,14 @@
 <div align="center">
 
 # 🪐 TESS Exoplanet Detection
-**A Hybrid Dual-View CNN–Transformer Architecture for Exoplanet Transit Detection in Noisy TESS Light Curves**
+**A Systematization of Knowledge (SoK): Multi-Modal Fusion Strategies for Exoplanet Transit Detection**
 
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.3%2B-EE4C2C.svg?style=flat-square&logo=pytorch)](https://pytorch.org/)
+[![Weights & Biases](https://img.shields.io/badge/W&B-Experiment_Tracking-FFBE00.svg?style=flat-square&logo=weightsandbiases)](https://wandb.ai/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
-> A deep learning pipeline for the automated classification of exoplanet transit signals in NASA TESS photometric data.
+> An end-to-end deep learning pipeline for identifying exoplanet transits in NASA TESS photometry, featuring a comprehensive ablation study on injecting physical stellar metadata into Transformer sequences.
 
 </div>
 
@@ -15,102 +16,52 @@
 
 ## 🚀 Overview
 
-This repository presents a deep learning pipeline for automated classification of exoplanet transit signals. We propose a dual-view, cross-attention hybrid architecture that improves upon pure-CNN baselines (e.g., AstroNet) by:
-* **Dual-View Processing:** Simultaneously processing a global phase-folded view (full orbital period) and a local zoomed view (transit window), giving the model both long-range context and fine-grained transit morphology.
-* **Cross-Attention Mechanism:** Replacing the standard dense combination of views with a cross-attention Transformer encoder, letting each view attend to the other's feature sequence.
-* **Imbalance Handling:** Addressing severe class imbalance (~2–3% of TCEs are planets) using Focal Loss and dynamic threshold optimization.
-* **Explainability:** Providing explainability via attention weight visualization, showing exactly which parts of the light curve the model focuses on.
+Distinguishing true planetary transits from stellar-mass companions (e.g., grazing Eclipsing Binaries) is a fundamental challenge in astrophysics. Traditional models treat physical metadata as an afterthought. This repository presents a **Dual-View CNN-Transformer** that solves this by evaluating four distinct methods of physical data fusion. 
+
+**Key Contributions:**
+* **Dual-View Processing:** Simultaneously processes a global phase-folded view (baseline noise) and a local zoomed view (transit morphology).
+* **The "Meta Token" Strategy:** Proves that projecting physical stellar metadata (Temperature, Radius, Gravity) as a native sequence token inside a Transformer is vastly superior to traditional Late Fusion (MLP).
+* **Imbalance Handling:** Addresses severe class imbalance dynamically in-memory using a Weighted Random Sampler and Focal Loss, eliminating the need for static oversampling.
+* **Explainability:** Provides mathematical proof of physical reasoning via attention weight extraction, showing exactly *when* the model relies on astrophysical parameters to make decisions.
 
 ---
 
 ## 🧠 Architecture
 
-    Global view (2048 pts) ──► CNN Encoder ──►
-                                                \
-                                                 ──► Cross-Attention Transformer ──► Classifier ──► p(planet)
-                                                /
-    Local view  (201 pts)  ──► CNN Encoder ──►
+```text
+Global view (2048 pts) ──► CNN Encoder ──► [Global Token] \
+Local view  (201 pts)  ──► CNN Encoder ──► [Local Token]  ──► Cross-Attention Transformer ──► p(planet)
+Stellar Physics        ──► Linear Proj ──► [Meta Token]   /
+(Temp, Radius, Grav)
+Unlike standard classifiers that concatenate data at the bottleneck, the Meta Token architecture allows the Local View to directly query the host star's physics via Self-Attention before classification.📂 Repository StructurePlaintexttess-exoplanet-hybrid/
+├── configs/
+│   └── config.yaml             # Hyperparameters, paths, and W&B config
+├── src/
+│   ├── data_pipeline.py        # AWS S3 cloud-accelerated ingestion & phase-folding
+│   ├── model.py                # Dual-View CNN-Transformer with toggleable fusion
+│   ├── train.py                # Main training loop with Focal Loss & SMOTE balancing
+│   ├── evaluate.py             # Calculates metrics and optimal PR thresholds
+│   ├── plot_roc.py             # Generates comparative ROC curves for Ablation Study
+│   ├── visualise_attention.py  # Extracts 3x3 Transformer attention heatmaps
+│   ├── error_analysis.py       # Plots False Positive/Negative boundary cases
+│   └── utils.py                # Helpers for metrics and GPU allocation
+├── tests/
+│   └── test_model.py           # Unit tests for tensor dimension validation
+├── requirements.txt            
+└── README.md
+⚡ Quickstart1. Clone and InstallBashgit clone [https://github.com/GoodAsur2023/tess-exoplanet-hybrid.git](https://github.com/GoodAsur2023/tess-exoplanet-hybrid.git)
+cd tess-exoplanet-hybrid
+pip install -r requirements.txt
+2. Authenticate Tracking (Optional but Recommended)Bashwandb login
+3. Run the PipelineBash# Verify architecture tensor dimensions
+python tests/test_model.py
 
-*(See `src/model.py` for the full PyTorch implementation).*
+# Build the dataset from NASA MAST
+python src/data_pipeline.py --config configs/config.yaml
 
----
+# Train the Champion Model (Meta Token)
+python src/train.py --config configs/config.yaml --fusion_type meta_token
 
-## 📂 Repository Structure
-
-    tess-exoplanet-hybrid/
-    ├── configs/
-    │   └── config.yaml          # All hyperparameters and paths
-    ├── data/
-    │   ├── raw/                 # TCE CSV metadata (ignored by git)
-    │   └── processed/           # .npy light curve arrays (ignored by git)
-    ├── src/
-    │   ├── data_pipeline.py     # Download, preprocess, and save light curves
-    │   ├── model.py             # Dual-view CNN-Transformer architecture
-    │   ├── train.py             # Training loop with Focal Loss + W&B logging
-    │   ├── evaluate.py          # ROC-AUC, PR curves, confusion matrix, attention maps
-    │   └── utils.py             # Shared helpers (seeds, metrics, focal loss)
-    ├── notebooks/
-    │   └── EDA_and_Baseline.ipynb
-    ├── paper/
-    │   └── IEEE_Draft.tex
-    ├── .github/
-    │   └── workflows/
-    │       └── ci.yml
-    ├── requirements.txt
-    └── README.md
-
----
-
-## ⚡ Quickstart
-
-**1. Clone and install**
-
-    git clone https://github.com/GoodAsur23/tess-exoplanet-hybrid.git
-    cd tess-exoplanet-hybrid
-    pip install -r requirements.txt
-
-**2. Download the TCE metadata**
-
-Download `tess2018206190142-s0001-s0013_dvr-tcestats.csv` from the MAST archive and place it in `data/raw/`.
-
-**3. Build the dataset**
-
-    python src/data_pipeline.py --config configs/config.yaml
-
-*This downloads all light curves, applies dual-view phase-folding, cross-references labels with the NASA Exoplanet Archive, and saves `.npy` tensors to `data/processed/`.*
-
-**4. Train**
-
-    python src/train.py --config configs/config.yaml
-
-**5. Evaluate**
-
-    python src/evaluate.py --config configs/config.yaml --checkpoint checkpoints/best_model.pt
-
----
-
-## 📊 Results (V1 Baseline)
-
-*Initial baseline evaluation run on a highly imbalanced TESS test set (Threshold optimized to `0.84`).*
-
-| Model | Precision | Recall | F1 Score | ROC-AUC |
-| :--- | :--- | :--- | :--- | :--- |
-| **1D-CNN Baseline** | *Pending* | *Pending* | *Pending* | *Pending* |
-| **Ours (Dual-View Transformer)** | **50.0%** | **14.3%** | **0.2222** | **0.6745** |
-
-<details>
-<summary><b>View Confusion Matrix Breakdown</b></summary>
-
-* **True Negatives:** 225 *(Filtered out 99.5% of all background noise and false positives)*
-* **False Positives:** 1 *(Only 1 false alarm)*
-* **False Negatives:** 6 *(Missed planets due to strict thresholding)*
-* **True Positives:** 1 *(Successfully identified planet)*
-
-</details>
-
-*Note: The model currently exhibits extremely high precision, effectively filtering out 99.5% of false positives. Active work is ongoing to improve recall through hyperparameter tuning and expanded sector data.*
-
----
-<div align="center">
-<i>Built as an exploration into applied Deep Learning and Astrophysics.</i>
-</div>
+# Evaluate against the Test Set
+python src/evaluate.py --config configs/config.yaml --checkpoint checkpoints/meta_token/best_model.pt
+📊 Ablation Study & ResultsWe systematically tested four methods of physical metadata fusion to identify the most effective architecture. Evaluated on an unseen 15% test split.Fusion MethodTest AUCKey FindingMeta Token (Champion)0.9832Native sequence attention on physics is the superior fusion method.FiLM Modulation0.9602Early feature-wise scaling improves convergence over the baseline.Late Fusion (MLP)0.9542Standard concatenation is effective but lacks early physical context.The Science Way0.6558Manual physical scaling ($R^2$) destroys normalization and hinders feature extraction.Final Champion Metrics (Threshold = 0.6015)Recall: 97.39% (Successfully identifies nearly all actual exoplanets)Precision: 88.69% (High reliability; low false-alarm rate)F1-Score: 0.9283👁️ Interpretability & Error AnalysisAttention Heatmaps: By extracting weights from the final Transformer layer, we confirmed that the model exhibits physics-dependent gating. When querying the background noise (Macro View), the model ignores the star's physics (3.8% attention). However, when querying the transit dip (Local View), the model allocates 14.7% of its attention to the Stellar Meta Token to validate the physical probability of the planet.Error Analysis:Qualitative analysis of boundary cases shows:False Negatives: Primarily SNR-limited (missed planets are visually indistinguishable from background photon noise).False Positives: High-confidence errors are predominantly grazing Eclipsing Binaries, representing the fundamental photometric limits of the TESS instrument.<div align="center"><i>Research conducted at the Department of Computer Science and Engineering, PES University.Data provided by the NASA Mikulski Archive for Space Telescopes (MAST).</i></div>
