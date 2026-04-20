@@ -104,7 +104,7 @@ All models were evaluated on a strictly held-out **15% test split** containing v
 | 4 | "The Science Way" | 0.6558 | Manual radius scaling destroys learned normalization and catastrophically hinders gradient flow. |
 
 <div align="center">
-<img src="assets/ablation_roc_comparison.png" alt="Ablation ROC Comparison" width="680"/>
+<img src="ablation_roc_comparison.png" alt="Ablation ROC Comparison" width="680"/>
 <br/>
 <sub><i>Figure 1 — ROC curves comparing all four physical metadata fusion strategies on the held-out test set.</i></sub>
 </div>
@@ -141,7 +141,7 @@ A key criticism of deep learning in scientific discovery is opacity. To validate
 This **3.9× spike in Meta Token attention** during transit events mathematically demonstrates that the model dynamically gates stellar physics against photometric anomalies — precisely mirroring the logical workflow of a human astrophysicist who checks stellar radius only after flagging a candidate dip.
 
 <div align="center">
-<img src="assets/meta_token_attention.png" alt="Transformer Attention Heatmap" width="680"/>
+<img src="meta_token_attention.png" alt="Transformer Attention Heatmap" width="680"/>
 <br/>
 <sub><i>Figure 2 — 3×3 cross-view attention heatmap for a confirmed exoplanet. Elevated attention on the Meta Token (bottom row) is visible only during the transit query.</i></sub>
 </div>
