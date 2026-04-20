@@ -1,7 +1,7 @@
 <div align="center">
 
 # 🪐 TESS Exoplanet Detection
-**A Systematization of Knowledge (SoK): Multi-Modal Fusion Strategies for Exoplanet Transit Detection**
+** Multi-Modal Fusion Strategies for Exoplanet Transit Detection**
 
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.3%2B-EE4C2C.svg?style=flat-square&logo=pytorch)](https://pytorch.org/)
