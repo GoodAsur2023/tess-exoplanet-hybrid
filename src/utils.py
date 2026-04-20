@@ -1,144 +1,74 @@
-"""
-utils.py — Shared utilities for the TESS exoplanet detection pipeline.
-
-Provides: seed management, Focal Loss, metric computation, config loading.
-"""
-from __future__ import annotations
-
-import random
 import yaml
+import random
 from pathlib import Path
-from typing import Any
-
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from sklearn.metrics import (
-    average_precision_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+import numpy as np
+from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
+from torch.utils.data import Dataset, DataLoader
 
 
-# ── Config ────────────────────────────────────────────────────────────────────
-def load_config(config_path: str | Path) -> dict[str, Any]:
-    """Load a YAML config file and return it as a nested dict."""
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+def get_device():
+    """Automatically assigns the GPU if available, else falls back to CPU."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-# ── Reproducibility ───────────────────────────────────────────────────────────
-def set_seed(seed: int = 42) -> None:
-    """Set seeds for Python, NumPy, and PyTorch for full reproducibility."""
+def set_seed(seed=42):
+    """Locks in random seeds so ablation study is 100% reproducible."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def get_device() -> torch.device:
-    """Return the best available device (CUDA > MPS > CPU)."""
     if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
-
-# ── Loss ──────────────────────────────────────────────────────────────────────
-class FocalLoss(nn.Module):
-    """
-    Binary Focal Loss — Lin et al., 2017.
-
-    Focuses training on hard-to-classify examples by down-weighting easy
-    negatives. Critical for our severely imbalanced dataset (~2-5% positive).
-
-    Args:
-        alpha: Weight for the positive class. Set > 0.5 to up-weight planets.
-        gamma: Focusing parameter. gamma=0 reduces to BCE; gamma=2 is typical.
-        reduction: 'mean' | 'sum' | 'none'
-    """
-
-    def __init__(
-        self,
-        alpha: float = 0.75,
-        gamma: float = 2.0,
-        reduction: str = "mean",
-    ) -> None:
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
-        probs = torch.sigmoid(logits)
-        p_t = probs * targets + (1 - probs) * (1 - targets)
-        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
-        focal_weight = alpha_t * (1 - p_t) ** self.gamma
-        loss = focal_weight * bce
-        if self.reduction == "mean":
-            return loss.mean()
-        if self.reduction == "sum":
-            return loss.sum()
-        return loss
-
-
-# ── Metrics ───────────────────────────────────────────────────────────────────
-def compute_metrics(
-    y_true: np.ndarray,
-    y_prob: np.ndarray,
-    threshold: float = 0.5,
-) -> dict[str, float]:
-    y_pred = (y_prob >= threshold).astype(int)
+def compute_metrics(labels, preds, threshold=0.5):
+    """Calculates the scientific metrics for W&B dashboard."""
+    preds_binary = (preds >= threshold).astype(int)
+    
+    # Safely calculate AUC (handles rare edge cases in tiny batches)
+    try:
+        auc = roc_auc_score(labels, preds)
+    except ValueError:
+        auc = 0.5
+        
     return {
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
-        "roc_auc": roc_auc_score(y_true, y_prob),
-        "avg_precision": average_precision_score(y_true, y_prob),
-        "threshold": threshold,
+        "roc_auc": auc,
+        "f1": f1_score(labels, preds_binary, zero_division=0),
+        "precision": precision_score(labels, preds_binary, zero_division=0),
+        "recall": recall_score(labels, preds_binary, zero_division=0)
     }
 
-
-def find_best_threshold(
-    y_true: np.ndarray,
-    y_prob: np.ndarray,
-    metric: str = "f1",
-) -> float:
-    thresholds = np.linspace(0.1, 0.9, 81)
-    best_val, best_thresh = -1.0, 0.5
-    for t in thresholds:
-        y_pred = (y_prob >= t).astype(int)
-        if metric == "f1":
-            val = f1_score(y_true, y_pred, zero_division=0)
-        elif metric == "recall":
-            val = recall_score(y_true, y_pred, zero_division=0)
-        else:
-            raise ValueError(f"Unknown metric: {metric!r}")
-        if val > best_val:
-            best_val, best_thresh = val, t
-    return best_thresh
+def load_config(config_path="configs/config.yaml"):
+    """Loads the YAML configuration file."""
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
 
-# ── Checkpoint helpers ────────────────────────────────────────────────────────
-def save_checkpoint(
-    state: dict,
-    path: str | Path,
-    is_best: bool = False,
-) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(state, path)
-    if is_best:
-        best_path = path.parent / "best_model.pt"
-        torch.save(state, best_path)
+class TESSDataset(Dataset):
+    def __init__(self, data_dir: str):
+        p = Path(data_dir)
+        self.gv = torch.tensor(np.load(p / "global_views.npy"), dtype=torch.float32).unsqueeze(1)
+        self.lv = torch.tensor(np.load(p / "local_views.npy"), dtype=torch.float32).unsqueeze(1)
+        self.meta = torch.tensor(np.load(p / "stellar_meta.npy"), dtype=torch.float32)
+        self.labels = torch.tensor(np.load(p / "labels.npy"), dtype=torch.float32).unsqueeze(1)
 
+    def __len__(self):
+        return len(self.labels)
 
-def load_checkpoint(path: str | Path, device: torch.device) -> dict:
-    return torch.load(path, map_location=device)
+    def __getitem__(self, idx):
+        return self.gv[idx], self.lv[idx], self.meta[idx], self.labels[idx]
+
+def get_dataloaders(config: dict):
+    dataset = TESSDataset(config["paths"]["processed_dir"])
+    total = len(dataset)
+    val_size = int(total * config["data"]["val_fraction"])
+    test_size = int(total * config["data"]["test_fraction"])
+    train_size = total - val_size - test_size
+    
+    train_ds, val_ds, test_ds = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
+    
+    train_loader = DataLoader(train_ds, batch_size=config["training"]["batch_size"], shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=config["training"]["batch_size"])
+    test_loader = DataLoader(test_ds, batch_size=config["training"]["batch_size"])
+    
+    return train_loader, val_loader, test_loader

@@ -48,3 +48,13 @@ htmlcov/
 # Editor / IDE settings
 .vscode/
 .idea/
+
+# Accidental Local Library Installs (CRITICAL based on your file tree)
+numpy/
+IPython/
+jupyter/
+matplotlib/
+scipy/
+pandas/
+PIL/
+torch/

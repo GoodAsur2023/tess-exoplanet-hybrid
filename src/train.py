@@ -1,257 +1,263 @@
 """
-train.py — Training loop for the DualViewTransformer.
-
-Features:
-  - Focal Loss for class imbalance
-  - Cosine annealing LR with linear warmup
-  - Stratified train/val/test split
-  - Early stopping on validation ROC-AUC
-  - Weights & Biases logging (optional)
-  - Checkpoint saving (best + latest)
-
-Usage:
-    python src/train.py --config configs/config.yaml [--baseline]
+train.py — Training loop for the DualViewTransformer Ablation Study.
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
+# Add project root to path for local module imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.model import build_baseline, build_model, count_parameters
+
+from src.model import DualViewTransformer
 from src.utils import (
-    FocalLoss,
-    compute_metrics,
     get_device,
-    load_checkpoint,
     load_config,
-    save_checkpoint,
     set_seed,
+    compute_metrics
 )
+
+# --- HELPER FUNCTION ---
+def count_parameters(model):
+    """Counts the number of trainable parameters in the model."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+# Focal Loss (Redefined here for safety out-of-the-box)
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.bce = nn.BCEWithLogitsLoss(reduction='none')
+
+    def forward(self, inputs, targets):
+        bce_loss = self.bce(inputs, targets)
+        pt = torch.exp(-bce_loss)
+        focal_loss = self.alpha * (1 - pt)**self.gamma * bce_loss
+        return focal_loss.mean()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-
 # ── Dataset ───────────────────────────────────────────────────────────────────
 class TESSDataset(Dataset):
-    def __init__(
-        self,
-        global_views: np.ndarray,
-        local_views: np.ndarray,
-        labels: np.ndarray,
-        augment: bool = False,
-        noise_std: float = 0.05,
-    ) -> None:
-        assert len(global_views) == len(local_views) == len(labels)
-        self.global_views = torch.tensor(global_views, dtype=torch.float32)
-        self.local_views  = torch.tensor(local_views,  dtype=torch.float32)
-        self.labels       = torch.tensor(labels,       dtype=torch.float32)
-        self.augment  = augment
-        self.noise_std = noise_std
+    def __init__(self, global_views, local_views, stellar_meta, labels, fusion_type="mlp"):
+        self.gv = torch.tensor(global_views, dtype=torch.float32).unsqueeze(1)
+        self.lv = torch.tensor(local_views, dtype=torch.float32).unsqueeze(1)
+        self.meta = torch.tensor(stellar_meta, dtype=torch.float32)
+        self.labels = torch.tensor(labels, dtype=torch.float32).unsqueeze(1)
+        self.fusion_type = fusion_type
 
     def __len__(self) -> int:
         return len(self.labels)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        gv = self.global_views[idx].clone()
-        lv = self.local_views[idx].clone()
-        label = self.labels[idx]
-        if self.augment:
-            if torch.rand(1).item() < 0.5:
-                gv = gv.flip(0)
-                lv = lv.flip(0)
-            gv = gv + torch.randn_like(gv) * self.noise_std
-            lv = lv + torch.randn_like(lv) * self.noise_std
-        return gv, lv, label
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        gv_i = self.gv[idx]
+        lv_i = self.lv[idx]
+        meta_i = self.meta[idx]
+        
+        # === ABLATION 4: The Science Way (Astrophysics) ===
+        if self.fusion_type == "astrophysics":
+            # meta_i[2] is the normalized stellar radius. 
+            # We explicitly remove the stellar radius bias from the flux dip.
+            rad_squared = (meta_i[2] ** 2)
+            gv_i = gv_i * rad_squared
+            lv_i = lv_i * rad_squared
 
+        return gv_i, lv_i, meta_i, self.labels[idx]
 
-# ── Data loading helpers ──────────────────────────────────────────────────────
-def load_processed_data(config: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    processed = Path(config["paths"]["processed_dir"])
-    global_views = np.load(processed / "global_views.npy")
-    local_views  = np.load(processed / "local_views.npy")
-    labels       = np.load(processed / "labels.npy")
-    return global_views, local_views, labels
-
-
+# ── Dataloaders ───────────────────────────────────────────────────────────────
 def make_dataloaders(config: dict) -> tuple[DataLoader, DataLoader, DataLoader]:
-    cfg = config["data"]
-    global_views, local_views, labels = load_processed_data(config)
+    cfg_paths = config["paths"]
+    cfg_data = config["data"]
+    cfg_train = config["training"]
+    fusion_type = config["model"].get("fusion_type", "mlp")
 
-    idx = np.arange(len(labels))
-    idx_train, idx_tmp, _, y_tmp = train_test_split(
-        idx, labels,
-        test_size=cfg["val_fraction"] + cfg["test_fraction"],
-        stratify=labels, random_state=cfg["seed"],
+    data_dir = Path(cfg_paths["processed_dir"])
+    logger.info(f"Loading arrays from: {data_dir}")
+    gv = np.load(data_dir / "global_views.npy")
+    lv = np.load(data_dir / "local_views.npy")
+    mt = np.load(data_dir / "stellar_meta.npy")
+    lb = np.load(data_dir / "labels.npy")
+
+    # Stratified Split (Train / Temp)
+    test_val_ratio = cfg_data["val_fraction"] + cfg_data["test_fraction"]
+    train_idx, temp_idx = train_test_split(
+        np.arange(len(lb)), test_size=test_val_ratio, stratify=lb, random_state=cfg_data["seed"]
     )
-    idx_val, idx_test = train_test_split(
-        idx_tmp, test_size=0.5, stratify=y_tmp, random_state=cfg["seed"],
+    
+    # Stratified Split (Val / Test)
+    val_ratio = cfg_data["val_fraction"] / test_val_ratio
+    val_idx, test_idx = train_test_split(
+        temp_idx, test_size=(1 - val_ratio), stratify=lb[temp_idx], random_state=cfg_data["seed"]
     )
-    logger.info(f"Split → train: {len(idx_train):,}  val: {len(idx_val):,}  test: {len(idx_test):,}")
 
-    batch = config["training"]["batch_size"]
-    train_ds = TESSDataset(global_views[idx_train], local_views[idx_train], labels[idx_train], augment=True)
-    val_ds   = TESSDataset(global_views[idx_val],   local_views[idx_val],   labels[idx_val])
-    test_ds  = TESSDataset(global_views[idx_test],  local_views[idx_test],  labels[idx_test])
+    train_dataset = TESSDataset(gv[train_idx], lv[train_idx], mt[train_idx], lb[train_idx], fusion_type)
+    val_dataset = TESSDataset(gv[val_idx], lv[val_idx], mt[val_idx], lb[val_idx], fusion_type)
+    test_dataset = TESSDataset(gv[test_idx], lv[test_idx], mt[test_idx], lb[test_idx], fusion_type)
 
-    class_counts = np.bincount(labels[idx_train].astype(int))
-    weights = 1.0 / class_counts[labels[idx_train].astype(int)]
-    sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
+    # SMOTE-style class balancing using WeightedRandomSampler
+    class_counts = np.bincount(lb[train_idx].astype(int))
+    weights = 1.0 / class_counts
+    sample_weights = weights[lb[train_idx].astype(int)]
+    sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
 
-    train_loader = DataLoader(train_ds, batch_size=batch, sampler=sampler, num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch * 2, shuffle=False, num_workers=2)
-    test_loader  = DataLoader(test_ds,  batch_size=batch * 2, shuffle=False, num_workers=2)
+    # Workers set to 2 for Colab stability
+    train_loader = DataLoader(train_dataset, batch_size=cfg_train["batch_size"], sampler=sampler, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=cfg_train["batch_size"], shuffle=False, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=cfg_train["batch_size"], shuffle=False, num_workers=2, pin_memory=True)
+
     return train_loader, val_loader, test_loader
 
-
-# ── LR schedule ───────────────────────────────────────────────────────────────
-def get_scheduler(optimizer: optim.Optimizer, config: dict, steps_per_epoch: int):
-    cfg = config["training"]
-    total_steps  = cfg["epochs"] * steps_per_epoch
-    warmup_steps = cfg["warmup_epochs"] * steps_per_epoch
-
-    def lr_lambda(step: int) -> float:
-        if step < warmup_steps:
-            return step / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return 0.5 * (1.0 + np.cos(np.pi * progress))
-
-    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-
-# ── Evaluation pass ───────────────────────────────────────────────────────────
-@torch.no_grad()
-def evaluate(model, loader, criterion, device) -> tuple[float, dict]:
-    model.eval()
-    all_probs, all_labels = [], []
+# ── Training Loops ────────────────────────────────────────────────────────────
+def train_one_epoch(model, dataloader, criterion, optimizer, device):
+    model.train()
     total_loss = 0.0
-    for gv, lv, labels in loader:
-        gv, lv, labels = gv.to(device), lv.to(device), labels.to(device)
-        logits, _ = model(gv, lv)
-        loss = criterion(logits, labels)
-        total_loss += loss.item() * len(labels)
-        all_probs.append(torch.sigmoid(logits).cpu().numpy())
-        all_labels.append(labels.cpu().numpy())
-    all_probs  = np.concatenate(all_probs)
-    all_labels = np.concatenate(all_labels)
-    avg_loss = total_loss / len(all_labels)
-    metrics  = compute_metrics(all_labels, all_probs)
-    return avg_loss, metrics
+    all_preds, all_labels = [], []
+    
+    for gv, lv, mt, labels in dataloader:
+        gv, lv, mt, labels = gv.to(device), lv.to(device), mt.to(device), labels.to(device)
+        
+        optimizer.zero_grad()
+        outputs = model(gv, lv, mt)
+        loss = criterion(outputs, labels)
+        
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        
+        total_loss += loss.item()
+        probs = torch.sigmoid(outputs).detach().cpu().numpy()
+        all_preds.extend(probs)
+        all_labels.extend(labels.cpu().numpy())
+        
+    metrics = compute_metrics(np.array(all_labels), np.array(all_preds))
+    return total_loss / len(dataloader), metrics
 
+@torch.no_grad()
+def evaluate(model, dataloader, criterion, device):
+    model.eval()
+    total_loss = 0.0
+    all_preds, all_labels = [], []
+    
+    for gv, lv, mt, labels in dataloader:
+        gv, lv, mt, labels = gv.to(device), lv.to(device), mt.to(device), labels.to(device)
+        outputs = model(gv, lv, mt)
+        loss = criterion(outputs, labels)
+        
+        total_loss += loss.item()
+        probs = torch.sigmoid(outputs).detach().cpu().numpy()
+        all_preds.extend(probs)
+        all_labels.extend(labels.cpu().numpy())
+        
+    metrics = compute_metrics(np.array(all_labels), np.array(all_preds))
+    return total_loss / len(dataloader), metrics
 
-# ── Main training loop ────────────────────────────────────────────────────────
-def train(config: dict, use_baseline: bool = False) -> None:
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main(config: dict):
     set_seed(config["data"]["seed"])
     device = get_device()
+    
     logger.info(f"Using device: {device}")
-
-    use_wandb = config["logging"]["use_wandb"]
-    if use_wandb:
-        try:
-            import wandb
-            wandb.init(
-                project=config["logging"]["wandb_project"],
-                entity=config["logging"]["wandb_entity"],
-                config=config,
-                name="baseline-cnn" if use_baseline else "dual-view-transformer",
-            )
-        except ImportError:
-            logger.warning("wandb not installed — skipping logging.")
-            use_wandb = False
-
-    if use_baseline:
-        model = build_baseline(config, device)
-        logger.info("Training BASELINE 1D-CNN.")
-    else:
-        model = build_model(config, device)
-        logger.info("Training DUAL-VIEW TRANSFORMER.")
-    logger.info(f"Trainable parameters: {count_parameters(model):,}")
-
+    logger.info(f"Ablation Study Fusion Type: {config['model']['fusion_type'].upper()}")
+    
     train_loader, val_loader, test_loader = make_dataloaders(config)
-
-    cfg_t     = config["training"]
-    criterion = FocalLoss(alpha=cfg_t["focal_alpha"], gamma=cfg_t["focal_gamma"])
-    optimizer = optim.AdamW(model.parameters(), lr=cfg_t["learning_rate"], weight_decay=cfg_t["weight_decay"])
-    scheduler = get_scheduler(optimizer, config, len(train_loader))
-
-    ckpt_dir = Path(config["paths"]["checkpoint_dir"])
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    best_auc = 0.0
-    epochs_without_improvement = 0
-    log_interval = config["logging"]["log_interval"]
-
-    for epoch in range(1, cfg_t["epochs"] + 1):
-        model.train()
-        epoch_loss = 0.0
-        for step, (gv, lv, labels) in enumerate(train_loader, 1):
-            gv, lv, labels = gv.to(device), lv.to(device), labels.to(device)
-            optimizer.zero_grad()
-            logits, _ = model(gv, lv)
-            loss = criterion(logits, labels)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg_t["grad_clip"])
-            optimizer.step()
-            scheduler.step()
-            epoch_loss += loss.item()
-            if step % log_interval == 0:
-                logger.debug(f"Epoch {epoch} step {step}/{len(train_loader)} loss={loss.item():.4f}")
-
-        val_loss, val_metrics = evaluate(model, val_loader, criterion, device)
-        avg_train_loss = epoch_loss / len(train_loader)
-        auc = val_metrics["roc_auc"]
-
-        logger.info(
-            f"Epoch {epoch:3d} | train_loss={avg_train_loss:.4f}  val_loss={val_loss:.4f} "
-            f"| AUC={auc:.4f}  F1={val_metrics['f1']:.4f}  Recall={val_metrics['recall']:.4f}"
-        )
-
-        if use_wandb:
-            import wandb
-            wandb.log({"epoch": epoch, "train_loss": avg_train_loss, "val_loss": val_loss,
-                       "lr": scheduler.get_last_lr()[0], **{f"val_{k}": v for k, v in val_metrics.items()}})
-
-        state = {"epoch": epoch, "model_state": model.state_dict(),
-                 "optimizer_state": optimizer.state_dict(), "val_metrics": val_metrics, "config": config}
-        is_best = auc > best_auc
-        save_checkpoint(state, ckpt_dir / "latest.pt", is_best=is_best)
-        if is_best:
-            best_auc = auc
-            epochs_without_improvement = 0
-            logger.info(f"  ✓ New best AUC: {best_auc:.4f}")
-        else:
-            epochs_without_improvement += 1
-
-        if epochs_without_improvement >= cfg_t["patience"]:
-            logger.info(f"Early stopping after {epoch} epochs.")
-            break
-
-    logger.info("Loading best checkpoint for final test evaluation...")
-    best_state = load_checkpoint(ckpt_dir / "best_model.pt", device)
-    model.load_state_dict(best_state["model_state"])
-    test_loss, test_metrics = evaluate(model, test_loader, criterion, device)
-    logger.info(f"\n{'='*50}\nFINAL TEST RESULTS\n{'='*50}\n"
-                + "\n".join(f"  {k}: {v:.4f}" for k, v in test_metrics.items()))
-
+    
+    # Initialize the DualViewTransformer from model.py
+    model = DualViewTransformer(config).to(device)
+    logger.info(f"Total Model Parameters: {count_parameters(model):,}")
+    
+    use_wandb = config["logging"].get("use_wandb", False)
     if use_wandb:
         import wandb
-        wandb.log({f"test_{k}": v for k, v in test_metrics.items()})
-        wandb.finish()
+        wandb.init(
+            project=config["logging"]["wandb_project"],
+            entity=config["logging"].get("wandb_entity", None),
+            config=config
+        )
+        
+    cfg_t = config["training"]
+    
+    # Optimizer & Loss Setup
+    criterion = FocalLoss(alpha=cfg_t.get("focal_alpha", 0.65), gamma=cfg_t.get("focal_gamma", 1.5))
+    optimizer = optim.AdamW(model.parameters(), lr=float(cfg_t["learning_rate"]), weight_decay=float(cfg_t["weight_decay"]))
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg_t["epochs"])
+    
+    # Dynamic Checkpoint Directory based on Fusion Type
+    ckpt_dir = Path(config["paths"]["checkpoint_dir"]) / config["model"]["fusion_type"]
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    
+    best_auc = 0.0
+    patience_counter = 0
+    
+    for epoch in range(1, cfg_t["epochs"] + 1):
+        start_time = time.time()
+        train_loss, train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss, val_metrics = evaluate(model, val_loader, criterion, device)
+        scheduler.step()
+        
+        epoch_time = time.time() - start_time
+        logger.info(f"Epoch {epoch:03d} | {epoch_time:.1f}s | "
+                    f"Train Loss: {train_loss:.4f} AUC: {train_metrics['roc_auc']:.4f} | "
+                    f"Val Loss: {val_loss:.4f} AUC: {val_metrics['roc_auc']:.4f}")
+        
+        if use_wandb:
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": train_loss, "val_loss": val_loss,
+                "train_auc": train_metrics["roc_auc"], "val_auc": val_metrics["roc_auc"],
+                "train_f1": train_metrics["f1"], "val_f1": val_metrics["f1"],
+                "lr": optimizer.param_groups[0]['lr']
+            })
+            
+        if val_metrics["roc_auc"] > best_auc:
+            best_auc = val_metrics["roc_auc"]
+            patience_counter = 0
+            # Save Checkpoint
+            torch.save({
+                "epoch": epoch,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "val_metrics": val_metrics,
+                "config": config
+            }, ckpt_dir / "best_model.pt")
+            logger.info(f"  ✓ Saved new best model (AUC: {best_auc:.4f}) to {ckpt_dir.name}")
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= cfg_t.get("patience", 15):
+            logger.info(f"Early stopping triggered after {epoch} epochs.")
+            break
 
+    if use_wandb:
+        wandb.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config",   default="configs/config.yaml")
-    parser.add_argument("--baseline", action="store_true")
+    parser.add_argument("--config", default="/content/drive/MyDrive/TESS_Project/configs/config.yaml")
+    # Ablation Study Switch
+    parser.add_argument("--fusion_type", type=str, default="mlp", 
+                        choices=["mlp", "meta_token", "film", "astrophysics"],
+                        help="Choose the fusion architecture for the ablation study.")
     args = parser.parse_args()
+    
     config = load_config(args.config)
-    train(config, use_baseline=args.baseline)
+    
+    # Dynamically inject the chosen fusion type into the config object
+    config["model"]["fusion_type"] = args.fusion_type
+    
+    # Dynamically change the Weights & Biases project name so the runs are separated!
+    if config.get("logging", {}).get("use_wandb"):
+        config["logging"]["wandb_project"] = f"TESS-Ablation-{args.fusion_type}"
+        
+    main(config)

@@ -1,4 +1,5 @@
 lightkurve==2.4.2
+astroquery==0.4.7
 astropy==6.0.1
 numpy==1.26.4
 pandas==2.2.2
@@ -17,3 +18,6 @@ jupyterlab==4.2.1
 pytest==8.2.0
 ruff==0.4.4
 mypy==1.10.0
+psutil==5.9.8
+boto3==1.34.110
+botocore<1.42.85
